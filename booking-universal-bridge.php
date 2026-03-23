@@ -2,7 +2,7 @@
 /**
  * Plugin Name: TYA Universal Agency Bridge
  * Description: Master connector for WPTE, LatePoint, VikBooking, and more.
- * Version: 1.1.1
+ * Version: 1.1.2
  * Author: TYA Digital Automation
  */
 
