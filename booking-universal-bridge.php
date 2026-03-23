@@ -1,33 +1,20 @@
 <?php
 /**
- * Plugin Name: TYA Universal Agency Bridge
- * Description: Master connector for WPTE, LatePoint, VikBooking, and more.
- * Version: 1.1.2
+ * Plugin Name: TYA Universal Agency Bridge - Pro
+ * Description: Global Listener for WPTE, LatePoint, VikBooking, and WooCommerce.
+ * Version: 1.1.4
  * Author: TYA Digital Automation
  */
 
-// 1. Include the Update Checker Library
-require 'plugin-update-checker/plugin-update-checker.php';
-use YahnisElsts\PluginUpdateChecker\v5\PucFactory;
-
-// 2. Point it to your GitHub Repo
-$myUpdateChecker = PucFactory::buildUpdateChecker(
-    'https://github.com/consultasintitrek-cloud/tya-universal-bridge/', 
-    __FILE__, 
-    'tya-universal-bridge' 
-);
-
-// 3. Set the branch
-$myUpdateChecker->setBranch('main');
-
 if ( ! defined( 'ABSPATH' ) ) exit;
 
-// 1. CONFIGURATION: Your n8n Production Webhook URL
+// 1. CONFIGURATION
 define('TYA_MASTER_WEBHOOK', 'https://federally-unreproachable-love.ngrok-free.dev/webhook/Customer-Service');
 
-// 2. THE SENDER (Now including Site URL for your Group Architecture)
+// 2. THE SENDER
 function tya_send_to_n8n($payload) {
-    $payload['site_url'] = get_site_url(); // <--- THIS SOLVES THE GROUP ISSUE
+    $payload['site_url'] = get_site_url();
+    $payload['timestamp'] = current_time('mysql');
 
     wp_remote_post(TYA_MASTER_WEBHOOK, [
         'method'    => 'POST',
@@ -37,44 +24,48 @@ function tya_send_to_n8n($payload) {
     ]);
 }
 
-// --- LISTENERS ---
+// 3. THE GLOBAL WATCHER (Database Level Monitoring)
+add_action('wp_insert_post', function($post_id, $post, $update) {
+    // Only catch NEW entries to avoid loops
+    if ($update) return;
 
-// WP Travel Engine
-add_action('wp_travel_engine_after_booking_success', function($booking_id) {
-    $booking = new WP_Travel_Engine_Booking($booking_id);
-    $data = $booking->get_booking_data();
-    tya_send_to_n8n([
-        'source' => 'WPTE',
-        'full_name' => ($data['first_name'] ?? '') . ' ' . ($data['last_name'] ?? ''),
-        'email' => $data['email'] ?? '',
-        'total' => $data['total_price'] ?? 0,
-        'record_id' => $booking_id
-    ]);
-});
+    // The "Smart List" of booking types
+    $booking_types = [
+        'trip-booking',      // WP Travel Engine
+        'lp_booking',        // LatePoint
+        'vikbooking_order',   // VikBooking
+        'shop_order'         // WooCommerce
+    ];
 
-// LatePoint
-add_action('latepoint_booking_created', function($booking) {
-    tya_send_to_n8n([
-        'source' => 'LatePoint',
-        'full_name' => $booking->customer->full_name,
-        'email' => $booking->customer->email,
-        'total' => $booking->price,
-        'service' => $booking->service->name,
-        'record_id' => $booking->id
-    ]);
-});
+    if (in_array($post->post_type, $booking_types)) {
+        
+        // UNPACK THE HIDDEN STRINGS (Metadata)
+        $raw_meta = get_post_meta($post_id);
+        $clean_meta = [];
 
-// VikBooking
-add_action('vikbooking_after_save_order', function($order) {
-    tya_send_to_n8n([
-        'source' => 'VikBooking',
-        'full_name' => $order->cust_name,
-        'email' => $order->cust_mail,
-        'total' => $order->total_price,
-        'record_id' => $order->id
-    ]);
-});
-// Test: Send a message to n8n as soon as the plugin is activated
-register_activation_hook( __FILE__, function() {
-    tya_send_to_n8n(['status' => 'Plugin Activated', 'test' => 'Success']);
+        foreach ($raw_meta as $key => $value) {
+            // maybe_unserialize decodes the "strings" into readable data
+            $unpacked = maybe_unserialize($value[0]);
+            $clean_meta[$key] = $unpacked;
+        }
+
+        tya_send_to_n8n([
+            'source'    => 'Global-Watcher',
+            'type'      => $post->post_type,
+            'title'     => $post->post_title,
+            'record_id' => $post_id,
+            'data'      => $clean_meta // This is the fully decoded info for n8n
+        ]);
+    }
+}, 10, 3);
+
+// 4. BACKUP LISTENERS (Redundancy Layer)
+add_action('wp_travel_engine_after_booking_success', function($id) { tya_send_to_n8n(['source' => 'WPTE-Hook', 'id' => $id]); });
+add_action('latepoint_booking_created', function($b) { tya_send_to_n8n(['source' => 'LatePoint-Hook', 'id' => $b->id]); });
+add_action('vikbooking_booking_conversion_tracking', function($d) { tya_send_to_n8n(['source' => 'VikBooking-Hook', 'data' => $d]); });
+add_action('woocommerce_new_order', function($id) { tya_send_to_n8n(['source' => 'WooCommerce-Hook', 'id' => $id]); });
+
+// Activation Heartbeat
+register_activation_hook(__FILE__, function() {
+    tya_send_to_n8n(['status' => 'Plugin Activated', 'version' => '1.1.4', 'test' => 'Success']);
 });
