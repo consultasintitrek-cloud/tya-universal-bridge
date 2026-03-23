@@ -74,3 +74,7 @@ add_action('vikbooking_after_save_order', function($order) {
         'record_id' => $order->id
     ]);
 });
+// Test: Send a message to n8n as soon as the plugin is activated
+register_activation_hook( __FILE__, function() {
+    tya_send_to_n8n(['status' => 'Plugin Activated', 'test' => 'Success']);
+});
