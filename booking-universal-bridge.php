@@ -1,8 +1,8 @@
 <?php
 /**
  * Plugin Name: TYA Universal - THE CORE
- * Version: 1.2.0
- * Description: Anti-proof Zero-Knowledge Collector. 5s Delay for Meta-Sync.
+ * Version: 1.2.1
+ * Description: Zero-Knowledge Collector + Relational Stitching & Rebel Hooks.
  * Author: TYA Digital Automation
  */
 
@@ -22,33 +22,33 @@ function tya_universal_sender($payload) {
 }
 
 /**
- * PART 1: THE UNIVERSAL WATCHER
- * Watches for NEW entries in the database (WPTE, LatePoint, Amelia, etc.)
+ * PART 1: THE UNIVERSAL WATCHER (WPTE, Amelia, etc.)
  */
 add_action('wp_insert_post', function($post_id, $post, $update) {
-    // Only trigger on NEW bookings, not updates
     if ($update) return;
-
-    // List of standard WP types to ignore
     $ignore = ['post', 'page', 'attachment', 'revision', 'nav_menu_item', 'custom_css', 'customize_changeset', 'oembed_cache', 'user_request'];
 
     if (!in_array($post->post_type, $ignore)) {
-        // CRITICAL 5-SECOND DELAY: Gives plugins time to write "Pending" MetaData
         wp_schedule_single_event(time() + 5, 'tya_core_capture_event', [$post_id, $post->post_type, $post->post_title]);
     }
 }, 10, 3);
 
-/**
- * THE DATA PACKER
- * Runs 5 seconds after the booking is created
- */
 add_action('tya_core_capture_event', function($post_id, $type, $title) {
     $all_meta = get_post_meta($post_id);
     $clean_data = [];
 
     foreach ($all_meta as $key => $value) {
-        // Decodes WPTE/LatePoint "Hard Strings" automatically
         $clean_data[$key] = maybe_unserialize($value[0]);
+    }
+
+    // --- WPTE STITCHER: If this is a payment, grab the parent booking tour info! ---
+    if (isset($clean_data['booking_id'])) {
+        $parent_id = $clean_data['booking_id'];
+        $parent_meta = get_post_meta($parent_id);
+        foreach ($parent_meta as $pkey => $pvalue) {
+            // We prefix it so you know it came from the parent tour booking
+            $clean_data['tour_details_' . $pkey] = maybe_unserialize($pvalue[0]);
+        }
     }
 
     tya_universal_sender([
@@ -61,10 +61,29 @@ add_action('tya_core_capture_event', function($post_id, $type, $title) {
 }, 10, 3);
 
 /**
- * PART 2: THE REBEL HOOKS
- * For plugins that don't use standard Post tables
+ * PART 2: THE REBEL HOOKS (LatePoint & VikBooking)
  */
+
+// REBEL 1: VikBooking (With Room Name SQL Lookup)
 add_action('vikbooking_booking_conversion_tracking', function($d) {
+    global $wpdb;
+    
+    // Attempt to look up the room name from VikBooking's custom tables
+    $room_name = 'Unknown Room';
+    if (isset($d['id'])) {
+        $order_table = $wpdb->prefix . 'vikbooking_orders';
+        $room_table = $wpdb->prefix . 'vikbooking_rooms';
+        
+        // Find the room ID linked to this order, then get the room name
+        $item_id = $wpdb->get_var($wpdb->prepare("SELECT idItem FROM {$order_table} WHERE id = %d", $d['id']));
+        if ($item_id) {
+            $found_room = $wpdb->get_var($wpdb->prepare("SELECT name FROM {$room_table} WHERE id = %d", $item_id));
+            if ($found_room) $room_name = $found_room;
+        }
+    }
+    
+    $d['fetched_room_name'] = $room_name; // Adds the room name to your webhook payload!
+
     tya_universal_sender([
         'source'      => 'VikBooking-Hook',
         'plugin_type' => 'vikbooking',
@@ -72,7 +91,24 @@ add_action('vikbooking_booking_conversion_tracking', function($d) {
     ]);
 });
 
-// Activation Check
-register_activation_hook(__FILE__, function() {
-    tya_universal_sender(['status' => 'Core Activated', 'version' => '1.2.0']);
+// REBEL 2: LatePoint (Bypasses wp_posts completely)
+add_action('latepoint_booking_created', function($booking) {
+    // LatePoint requires us to manually extract the object data
+    if (!$booking) return;
+    
+    $data = [
+        'booking_id' => $booking->id,
+        'service_name' => isset($booking->service) ? $booking->service->name : 'Unknown Service',
+        'customer_name' => isset($booking->customer) ? $booking->customer->full_name : 'Unknown',
+        'customer_email' => isset($booking->customer) ? $booking->customer->email : 'Unknown',
+        'start_date' => $booking->start_date,
+        'start_time' => $booking->start_time,
+        'status' => $booking->status
+    ];
+
+    tya_universal_sender([
+        'source'      => 'LatePoint-Hook',
+        'plugin_type' => 'latepoint',
+        'data'        => $data
+    ]);
 });
