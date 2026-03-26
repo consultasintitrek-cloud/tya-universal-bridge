@@ -91,19 +91,21 @@ add_action('vikbooking_booking_conversion_tracking', function($d) {
     ]);
 });
 
-// REBEL 2: LatePoint (Bypasses wp_posts completely)
+// REBEL 2: LatePoint (Full Data Capture)
 add_action('latepoint_booking_created', function($booking) {
-    // LatePoint requires us to manually extract the object data
     if (!$booking) return;
     
+    // We are manually telling the plugin: "Go grab these specific things"
     $data = [
-        'booking_id' => $booking->id,
-        'service_name' => isset($booking->service) ? $booking->service->name : 'Unknown Service',
-        'customer_name' => isset($booking->customer) ? $booking->customer->full_name : 'Unknown',
+        'booking_id'     => $booking->id,
+        'service_name'   => isset($booking->service) ? $booking->service->name : 'Unknown Service',
+        'customer_name'  => isset($booking->customer) ? $booking->customer->full_name : 'Unknown',
         'customer_email' => isset($booking->customer) ? $booking->customer->email : 'Unknown',
-        'start_date' => $booking->start_date,
-        'start_time' => $booking->start_time,
-        'status' => $booking->status
+        'customer_phone' => isset($booking->customer) ? $booking->customer->phone : '', // THE MISSING LINK 1
+        'total_price'    => isset($booking->price) ? $booking->price : 0,               // THE MISSING LINK 2
+        'start_date'     => $booking->start_date,
+        'start_time'     => $booking->start_time,
+        'status'         => $booking->status
     ];
 
     tya_universal_sender([
