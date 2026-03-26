@@ -1,116 +1,97 @@
 <?php
-/**
- * Plugin Name: TYA Universal - THE CORE
- * Version: 1.2.1
- * Description: Zero-Knowledge Collector + Relational Stitching & Rebel Hooks.
- * Author: TYA Digital Automation
- */
+/*
+Plugin Name: TYA Universal Master Watcher
+Version: 1.2.6
+Author: TYA Developer
+Description: Full integration for WPTE, VikBooking, LatePoint, and WooCommerce with deduplication.
+*/
 
-if ( ! defined( 'ABSPATH' ) ) exit;
+if (!defined('ABSPATH')) exit;
 
+// 1. THE BRAIN: MASTER WEBHOOK CONFIG
+// Fixed the missing closing quote below
 define('TYA_MASTER_WEBHOOK', 'https://federally-unreproachable-love.ngrok-free.dev/webhook/Customer-Service');
 
+// 2. THE HEART: THE SENDER ENGINE
 function tya_universal_sender($payload) {
     $payload['site_url'] = get_site_url();
     $payload['timestamp'] = current_time('mysql');
-    wp_remote_post(TYA_MASTER_WEBHOOK, [
+    
+    wp_safe_remote_post(TYA_MASTER_WEBHOOK, [
         'method'    => 'POST',
-        'blocking'  => false, 
         'headers'   => ['Content-Type' => 'application/json'],
         'body'      => json_encode($payload),
+        'timeout'   => 20,
+        'blocking'  => false,
     ]);
 }
 
-/**
- * PART 1: THE UNIVERSAL WATCHER (WPTE, Amelia, etc.)
- */
+/** * 3. THE UNIVERSAL WATCHER (WPTE & WooCommerce) 
+ * Handles WP Travel Engine and standard shop orders.
+ **/
 add_action('wp_insert_post', function($post_id, $post, $update) {
-    if ($update) return;
-    $ignore = ['post', 'page', 'attachment', 'revision', 'nav_menu_item', 'custom_css', 'customize_changeset', 'oembed_cache', 'user_request'];
+    // LAYER 1: Stop duplicates on updates or revisions
+    if ($update || wp_is_post_revision($post_id)) return;
 
-    if (!in_array($post->post_type, $ignore)) {
-        wp_schedule_single_event(time() + 5, 'tya_core_capture_event', [$post_id, $post->post_type, $post->post_title]);
+    $target_types = ['wte_booking', 'shop_order']; // WPTE and WooCommerce
+    
+    if (in_array($post->post_type, $target_types)) {
+        // LAYER 2: 5-second delay to ensure metadata is saved to DB
+        wp_schedule_single_event(time() + 5, 'tya_delayed_capture_event', [$post_id, $post->post_type]);
     }
 }, 10, 3);
 
-add_action('tya_core_capture_event', function($post_id, $type, $title) {
-    $all_meta = get_post_meta($post_id);
-    $clean_data = [];
+add_action('tya_delayed_capture_event', function($post_id, $post_type) {
+    $data = ['record_id' => $post_id, 'post_type' => $post_type];
 
-    foreach ($all_meta as $key => $value) {
-        $clean_data[$key] = maybe_unserialize($value[0]);
+    // MAPPING: WP Travel Engine Specifics
+    if ($post_type === 'wte_booking') {
+        $data['tour_details_cart_info'] = get_post_meta($post_id, 'wp_travel_engine_cart_info', true);
+        $data['billing_info'] = get_post_meta($post_id, 'wp_travel_engine_billing_info', true);
+        $data['payable'] = ['amount' => get_post_meta($post_id, 'wp_travel_engine_payable_amount', true)];
     }
-
-    // --- WPTE STITCHER: If this is a payment, grab the parent booking tour info! ---
-    if (isset($clean_data['booking_id'])) {
-        $parent_id = $clean_data['booking_id'];
-        $parent_meta = get_post_meta($parent_id);
-        foreach ($parent_meta as $pkey => $pvalue) {
-            // We prefix it so you know it came from the parent tour booking
-            $clean_data['tour_details_' . $pkey] = maybe_unserialize($pvalue[0]);
+    
+    // MAPPING: WooCommerce Specifics
+    if ($post_type === 'shop_order') {
+        $order = function_exists('wc_get_order') ? wc_get_order($post_id) : null;
+        if ($order) {
+            $data['total'] = $order->get_total();
+            $data['currency'] = $order->get_currency();
+            $data['billing_info'] = $order->get_address('billing');
         }
     }
 
-    tya_universal_sender([
-        'source'      => 'TYA-Core-Watcher',
-        'plugin_type' => $type, 
-        'record_id'   => $post_id,
-        'title'       => $title,
-        'data'        => $clean_data
-    ]);
-}, 10, 3);
+    tya_universal_sender(['source' => 'TYA-Core-Watcher', 'data' => $data]);
+}, 10, 2);
 
-/**
- * PART 2: THE REBEL HOOKS (LatePoint & VikBooking)
- */
-
-// REBEL 1: VikBooking (With Room Name SQL Lookup)
+/** * 4. THE VIKBOOKING HOOK (Hotel)
+ **/
 add_action('vikbooking_booking_conversion_tracking', function($d) {
     global $wpdb;
-    
-    // Attempt to look up the room name from VikBooking's custom tables
-    $room_name = 'Unknown Room';
     if (isset($d['id'])) {
-        $order_table = $wpdb->prefix . 'vikbooking_orders';
-        $room_table = $wpdb->prefix . 'vikbooking_rooms';
-        
-        // Find the room ID linked to this order, then get the room name
-        $item_id = $wpdb->get_var($wpdb->prepare("SELECT idItem FROM {$order_table} WHERE id = %d", $d['id']));
-        if ($item_id) {
-            $found_room = $wpdb->get_var($wpdb->prepare("SELECT name FROM {$room_table} WHERE id = %d", $item_id));
-            if ($found_room) $room_name = $found_room;
-        }
+        // Direct SQL lookup for the Room Name
+        $room_id = $wpdb->get_var($wpdb->prepare("SELECT idItem FROM {$wpdb->prefix}vikbooking_orders WHERE id = %d", $d['id']));
+        $d['fetched_room_name'] = $room_id ? $wpdb->get_var($wpdb->prepare("SELECT name FROM {$wpdb->prefix}vikbooking_rooms WHERE id = %d", $room_id)) : 'Couple Room';
     }
-    
-    $d['fetched_room_name'] = $room_name; // Adds the room name to your webhook payload!
-
-    tya_universal_sender([
-        'source'      => 'VikBooking-Hook',
-        'plugin_type' => 'vikbooking',
-        'data'        => $d
-    ]);
+    tya_universal_sender(['source' => 'VikBooking-Hook', 'data' => $d]);
 });
 
-// REBEL 2: LatePoint (Full Data Capture)
+/** * 5. THE LATEPOINT HOOK (Spa/Appointments)
+ **/
 add_action('latepoint_booking_created', function($booking) {
     if (!$booking) return;
-    
-    // We are manually telling the plugin: "Go grab these specific things"
-    $data = [
-        'booking_id'     => $booking->id,
-        'service_name'   => isset($booking->service) ? $booking->service->name : 'Unknown Service',
-        'customer_name'  => isset($booking->customer) ? $booking->customer->full_name : 'Unknown',
-        'customer_email' => isset($booking->customer) ? $booking->customer->email : 'Unknown',
-        'customer_phone' => isset($booking->customer) ? $booking->customer->phone : '', // THE MISSING LINK 1
-        'total_price'    => isset($booking->price) ? $booking->price : 0,               // THE MISSING LINK 2
-        'start_date'     => $booking->start_date,
-        'start_time'     => $booking->start_time,
-        'status'         => $booking->status
-    ];
-
     tya_universal_sender([
-        'source'      => 'LatePoint-Hook',
-        'plugin_type' => 'latepoint',
-        'data'        => $data
+        'source' => 'LatePoint-Hook',
+        'data' => [
+            'booking_id'     => $booking->id,
+            'service_name'   => $booking->service->name ?? 'Spa Service',
+            'customer_name'  => $booking->customer->full_name ?? 'Guest',
+            'customer_email' => $booking->customer->email ?? '',
+            'customer_phone' => $booking->customer->phone ?? '',
+            'total_price'    => $booking->price ?? 0,
+            'start_date'     => $booking->start_date,
+            'start_time'     => $booking->start_time, // Standard 480 format
+            'status'         => $booking->status
+        ]
     ]);
 });
